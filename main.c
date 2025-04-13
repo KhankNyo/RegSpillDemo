@@ -64,25 +64,34 @@ typedef struct
     } As;
 } location;
 
-typedef struct 
+typedef struct variable
 {
     const char *Name;
     unsigned Start, End;
     location Location;
+
+    struct variable *Next, *Prev;
 } variable;
 
 typedef struct 
 {
     variable *Ptr;
     unsigned Count, Capacity;
+} variable_array;
+
+typedef struct 
+{
+    /* non owning pointers */
+    variable *Head;
+    variable *Tail;
+    unsigned Count;
 } variable_list;
 
 typedef struct 
 {
-    variable_list Active;
-    variable_list LiveIntervalByStart;
+    variable_array Active;
+    variable_array LiveIntervalByStart;
 } register_allocation_result;
-
 
 
 variable_list VarList_Init(void)
@@ -90,112 +99,80 @@ variable_list VarList_Init(void)
     return (variable_list) { 0 };
 }
 
-variable_list VarList_CopySortedByStartPoint(const variable_list Copy)
+void VarList_InsertInEndPointOrder(variable_list *List, variable *Var)
 {
-    if (0 == Copy.Count)
-    {
-        return VarList_Init();
-    }
-
-    variable_list New = {
-        .Ptr = malloc(Copy.Count * sizeof(Copy.Ptr[0])),
-        .Count = Copy.Count,
-        .Capacity = Copy.Count,
-    };
-    assert(NULL != New.Ptr);
-
-    for (unsigned i = 0; i < Copy.Count; i++)
-    {
-        New.Ptr[i] = Copy.Ptr[i];
-        unsigned j = i;
-        while (j > 0 
-        && New.Ptr[j - 1].Start > New.Ptr[j].Start)
-        {
-            SWAP(variable, New.Ptr[j - 1], New.Ptr[j]);
-            j--;
-        }
-    }
-    return New;
-}
-
-#define VarList_EnsurePush(p_list) \
-    if ((p_list)->Count + 1 >= (p_list)->Capacity) \
-        VarList_EnsureCapacity(p_list, ((p_list)->Count + 1) * 2)
-void VarList_EnsureCapacity(variable_list *List, unsigned NewCapacity)
-{
-    variable *Tmp = realloc(List->Ptr, NewCapacity * sizeof(Tmp[0]));
-    assert(NULL != Tmp);
-    List->Ptr = Tmp;
-    List->Capacity = NewCapacity;
-}
-
-void VarList_Push(variable_list *List, const variable *Var)
-{
-    VarList_EnsurePush(List);
-    List->Ptr[List->Count] = *Var;
-    List->Count++;
-}
-
-void VarList_Pop(variable_list *List)
-{
-    List->Count -= (List->Count > 0);
-}
-
-void VarList_InsertInEndPointOrder(variable_list *List, const variable *Var)
-{
-    VarList_EnsurePush(List);
-    variable *Ptr = List->Ptr;
-    if (List->Count == 0)
-    {
-        Ptr[0] = *Var;
-        List->Count++;
-        return;
-    }
-    unsigned Start = 0;
-    unsigned End = List->Count;
-    unsigned Mid = End/2;
-
-    while (Start + 1 < End)
-    {
-        if (Var->End < Ptr[Mid].End)
-        {
-            End = Mid;
-        }
-        else if (Var->End > Ptr[Mid].End)
-        {
-            Start = Mid;
-        }
-        else break;
-        Mid = Start + (End - Start)/2;
-    }
+    assert(Var && "VarList_InsertInEndPointOrder() unreachable");
+    Var->Prev = NULL;
+    Var->Next = NULL;
 
     List->Count++;
-    memmove(Ptr + Start + 1, Ptr + Start, sizeof(*Ptr) * (List->Count - End));
-    Ptr[Start] = *Var;
+    if (!List->Head)
+    {
+        List->Head = Var;
+        List->Tail = Var;
+        return;
+    }
+    assert(List->Tail && "VarList_InsertInEndPointOrder() unreachable");
+    if (List->Head->End > Var->End)
+    {
+        Var->Next = List->Head;
+        List->Head->Prev = Var;
+        return;
+    }
+    if (List->Tail->End < Var->End)
+    {
+        Var->Prev = List->Tail;
+        List->Tail->Next = Var;
+        List->Tail = Var;
+        return;
+    }
+    
+    variable *Curr = List->Head;
+    while (Curr && Curr->End < Var->End)
+    {
+        Curr = Curr->Next;
+    }
+
+    assert(Curr->Prev && Curr->Next && "VarList_InsertInEndPointOrder() unreachable");
+    variable *Prev = Curr->Prev;
+    Prev->Next = Var;
+    Var->Prev = Prev;
+    Var->Next = Curr;
+    Curr->Prev = Var;
 }
 
-void VarList_RemovePreserveOrder(variable_list *List, unsigned Index)
+void VarList_Remove(variable_list *List, variable *Node)
 {
-    if (Index >= List->Count)
+    assert(NULL != Node && "VarList_Remove");
+    if (0 == List->Count)
+    {
         return;
-
-    memmove(List->Ptr + Index, List->Ptr + Index + 1, (List->Count - Index - 1) * sizeof(List->Ptr[0]));
+    }
     List->Count--;
+
+    variable *Prev = Node->Prev;
+    variable *Next = Node->Next;
+    if (Prev)
+        Prev->Next = Next;
+    else
+        List->Head = Next;
+    if (Next)
+        Next->Prev = Prev;
+    else 
+        List->Tail = Prev;
+
+    Node->Next = NULL;
+    Node->Prev = NULL;
 }
 
-void VarList_Destroy(variable_list *List)
-{
-    free(List->Ptr);
-    *List = VarList_Init();
-}
 
 
-static void PrintInterval(const variable_list Vars, unsigned Start, unsigned End)
+static void PrintInterval(const variable_array Vars, unsigned Start, unsigned End)
 {
     /* print names */
     for (unsigned i = 0; i < Vars.Count; i++)
     {
-        printf("%s ", Vars.Ptr[i].Name);
+        printf("%s  ", Vars.Ptr[i].Name);
     }
     printf("\n");
 
@@ -208,11 +185,19 @@ static void PrintInterval(const variable_list Vars, unsigned Start, unsigned End
         {
             if (IN_RANGE(Var->Start, i, Var->End))
             {
-                printf("%c ", Var->Location.Type == LOCTYPE_REG? 'r' : 'm');
+                int Location = 'r', 
+                    Value = Var->Location.As.Register;
+                if (Var->Location.Type == LOCTYPE_MEM)
+                {
+                    Location = 'm';
+                    Value = Var->Location.As.Memory;
+                }
+
+                printf("%c%d ", Location, Value);
             }
             else
             {
-                printf("  ");
+                printf("   ");
             }
         }
         printf("\n");
@@ -220,47 +205,50 @@ static void PrintInterval(const variable_list Vars, unsigned Start, unsigned End
 }
 
 /* linear scan, implemented using Wikipedia's pseudocode, 
- * but with ExpireOldInterval(i) and SpillAtInterval(i) inlined */
-static register_allocation_result LinearScanRegAlloc(register_allocator *RegAlloc, program_stack_allocator *ProgStack, const variable_list Vars)
+ * but with ExpireOldInterval(i) and SpillAtInterval(i) inlined, 
+ * assuming we're operating on the variable list and it is already sorted by increasing starting point (reasonable for a normal program) */
+static void LinearScanRegAlloc(register_allocator *RegAlloc, program_stack_allocator *ProgStack, variable_array *Vars)
 {
-    /* TODO: ActiveInReg is not a deep copy, it should be a list of references to elements of LiveIntervalByStart */
-
     /* variables that are being used in register and is currently active, sorted by increasing end point */
-    variable_list ActiveInReg = VarList_Init(); 
+    variable_list Active = VarList_Init();
 
-    /* iterate through variables sorted by start point */
-    variable_list LiveIntervalByStart = VarList_CopySortedByStartPoint(Vars);
-    VARLIST_FOREACH(LiveIntervalByStart, i)
+    VARLIST_FOREACH(*Vars, i)
     {
         /* bookkeeping ActiveInReg, removing any residuals that have passed their end point */
-        for (unsigned j = 0; j < ActiveInReg.Count; j++)
+        variable *CurrInActive = Active.Head;
+        while (CurrInActive)
         {
-            if (ActiveInReg.Ptr[j].End >= i->Start)
+            if (CurrInActive->End >= i->Start)
                 break;
 
-            VarList_RemovePreserveOrder(&ActiveInReg, j);
-            RegAlloc_Dealloc(RegAlloc, ActiveInReg.Ptr[j].Location.As.Register);
+            /* remove the residual */
+            RegAlloc_Dealloc(RegAlloc, CurrInActive->Location.As.Register);
+            variable *Next = CurrInActive->Next;
+            VarList_Remove(&Active, CurrInActive);
+
+            /* iterate to the next node */
+            CurrInActive = Next;
         }
 
         /* after removing residual end points, try to allocate a register for i */
         /* if there are still registers left, use it */
-        if (ActiveInReg.Count != RegAlloc_RegisterCount(RegAlloc))
+        if (Active.Count != RegAlloc_RegisterCount(RegAlloc))
         {
             i->Location = LOC_REGISTER(RegAlloc_Allocate(RegAlloc));
-            VarList_InsertInEndPointOrder(&ActiveInReg, i);
+            VarList_InsertInEndPointOrder(&Active, i);
         }
         /* no register available, but if i has a shorter lifetime than the longest living active variable, 
          * we prefer i to be in a register instead of such variable */
-        else if (ActiveInReg.Ptr[ActiveInReg.Count - 1].End > i->End)
+        else if (Active.Tail->End > i->End)
         {
             /* spill the undesirable variable into memory */
-            variable *Spill = ActiveInReg.Ptr + ActiveInReg.Count - 1;
+            variable *Spill = Active.Tail;
             Spill->Location = LOC_MEMORY(ProgStack_Allocate(ProgStack));
-            VarList_Pop(&ActiveInReg);
+            VarList_Remove(&Active, Active.Tail);
 
             /* make i a register variable and append it to the active variable in register list */
             i->Location = LOC_REGISTER(Spill->Location.As.Register);
-            VarList_InsertInEndPointOrder(&ActiveInReg, i);
+            VarList_InsertInEndPointOrder(&Active, i);
         }
         /* as a last resort, i will reside in memory */
         else
@@ -268,11 +256,6 @@ static register_allocation_result LinearScanRegAlloc(register_allocator *RegAllo
             i->Location = LOC_MEMORY(ProgStack_Allocate(ProgStack));
         }
     }
-
-    return (register_allocation_result) {
-        .Active = ActiveInReg,
-        .LiveIntervalByStart = LiveIntervalByStart,
-    };
 }
 
 
@@ -280,11 +263,11 @@ int main(void)
 {
     variable Vars[] = {
         { .Name = "A", .Start = 0, .End = 10 },
-        { .Name = "B", .Start = 3, .End = 4 },
-        { .Name = "C", .Start = 6, .End = 7 },
-        { .Name = "D", .Start = 2, .End = 8 },
+        { .Name = "B", .Start = 1, .End = 9 },
+        { .Name = "C", .Start = 2, .End = 8 },
+        { .Name = "D", .Start = 3, .End = 7 },
     };
-    variable_list VarList = {
+    variable_array VarArray = {
         .Ptr = Vars,
         .Count = STATIC_ARRAY_SIZE(Vars),
         .Capacity = STATIC_ARRAY_SIZE(Vars)
@@ -292,14 +275,11 @@ int main(void)
 
     register_allocator RegAlloc = RegAlloc_Init();
     program_stack_allocator ProgStack = ProgStack_Init();
-    register_allocation_result Result = LinearScanRegAlloc(&RegAlloc, &ProgStack, VarList);
+    LinearScanRegAlloc(&RegAlloc, &ProgStack, &VarArray);
 
-    PrintInterval(VarList, 0, 10);
     printf("reg: %d, stack: %d\n", RegAlloc.FreeReg[0] + RegAlloc.FreeReg[1], ProgStack);
-    printf("\nActive: \n");
-    PrintInterval(Result.Active, 0, 10);
-    printf("\nLive: \n");
-    PrintInterval(Result.LiveIntervalByStart, 0, 10);
+    printf("Live: \n");
+    PrintInterval(VarArray, 0, 10);
     return 0;
 }
 
