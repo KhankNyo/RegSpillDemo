@@ -14,10 +14,9 @@
 } while (0)
 
 #define VARLIST_FOREACH(varlist, iter_name) for (variable *iter_name = (varlist).Ptr; iter_name < (varlist).Ptr + (varlist).Count; iter_name++)
-#define VARLIST_AT_OR_NULL(varlist, index) ((index) < (varlist).Count ? &(varlist).Ptr[index] : NULL)
 
 #define LOC_REGISTER(index) (location) {.Type = LOCTYPE_REG, .As.Register = index}
-#define LOC_MEMORY(index) (location) {.Type = LOCTYPE_MEM, .As.Register = index}
+#define LOC_MEMORY(index) (location) {.Type = LOCTYPE_MEM, .As.Memory = index}
 
 #define RegAlloc_RegisterCount(p_regalloc) 2
 
